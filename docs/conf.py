@@ -33,6 +33,7 @@ sys.path.insert(0, project_root)
 
 import enterprise
 
+
 # -- General configuration ---------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
@@ -41,6 +42,12 @@ import enterprise
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
 extensions = ['sphinx.ext.autodoc', 'sphinx.ext.viewcode']
+
+# get doctrings for __init__ method
+autoclass_content = 'both'
+
+# make order or docs 'groupwise'
+autodoc_member_order = 'groupwise'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -273,3 +280,18 @@ texinfo_documents = [
 
 # If true, do not generate a @detailmenu in the "Top" node's menu.
 #texinfo_no_detailmenu = False
+
+# allows readthedocs to auto-generate docs
+import subprocess
+def run_apidoc(_):
+    modules = ['../enterprise']
+    for module in modules:
+        output_path = os.path.abspath(os.path.dirname(__file__))
+        cmd_path = 'sphinx-apidoc'
+        if hasattr(sys, 'real_prefix'):  # Check to see if we are in a virtualenv
+            # If we are, assemble the path manually
+            cmd_path = os.path.abspath(os.path.join(sys.prefix, 'bin', 'sphinx-apidoc'))
+        subprocess.check_call([cmd_path, '-o', output_path, '-f', '-M', module])
+
+def setup(app):
+    app.connect('builder-inited', run_apidoc)
