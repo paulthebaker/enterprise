@@ -83,10 +83,8 @@ def createfourierdesignmatrix_red(t, nmodes, freq=False, Tspan=None,
 
     # The sine/cosine modes
     if pshift:
-        F[:,::2] = np.sin(2*np.pi*t[:,None]*f[None,:] +
-                          ranphase[None,:])
-        F[:,1::2] = np.cos(2*np.pi*t[:,None]*f[None,:] +
-                           ranphase[None,:])
+        F[:,::2] = np.sin(2*np.pi*t[:,None]*f[None,:] + ranphase[None,:])
+        F[:,1::2] = np.cos(2*np.pi*t[:,None]*f[None,:] + ranphase[None,:])
     elif not pshift:
         F[:,::2] = np.sin(2*np.pi*t[:,None]*f[None,:])
         F[:,1::2] = np.cos(2*np.pi*t[:,None]*f[None,:])
