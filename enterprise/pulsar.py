@@ -19,6 +19,7 @@ try:
 except ImportError:
     print('ERROR: Must have libstempo package installed!')
     t2 = None
+    exit()
 
 
 class Pulsar(object):

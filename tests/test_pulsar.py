@@ -11,7 +11,7 @@ for time slicing, PINT integration and pickling.
 
 
 import unittest
-from enterprise_test_data import datadir
+from .enterprise_test_data import datadir
 from enterprise.pulsar import Pulsar
 
 
