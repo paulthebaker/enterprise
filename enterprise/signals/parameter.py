@@ -119,3 +119,19 @@ def Constant(val=None):
         value = val
 
     return Constant
+
+
+def Empirical(rv_hist, size=None):
+    """Class factory for parameters with empirical priors
+    :param rv_hist:
+        and instantiated scipy.stats.rv_histogram object
+    """
+    class Empirical(Parameter):
+        _prior = prior.Prior(rv_hist)
+        _size = size
+
+        def __repr__(self):
+            return '"{}": Empirical()'.format(self.name) \
+                + ('' if self._size is None else '[{}]'.format(self._size))
+
+    return Empirical
