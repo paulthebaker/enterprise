@@ -40,8 +40,8 @@ def BasisGP(priorFunction, basisFunction,
                 pname = '_'.join([n for n in pnames if n])
                 self._prior[key] = priorfn(pname, psr=psr)
                 self._bases[key] = basisfn(pname, psr=psr)
-                params = sum([self._prior[key]._params.values(),
-                              self._bases[key]._params.values()],[])
+                params = sum([list(self._prior[key]._params.values()),
+                              list(self._bases[key]._params.values())],[])
                 for param in params:
                     self._params[param.name] = param
 
@@ -62,7 +62,7 @@ def BasisGP(priorFunction, basisFunction,
 
             nc = np.sum(F.shape[1] for F in basis.values())
             self._basis = np.zeros((len(self._masks[0]), nc))
-            self._phi = np.zeros(nc)
+            self._phi = base.KernelMatrix(nc)
             self._slices = {}
             nctot = 0
             for key, mask in zip(self._keys, self._masks):
@@ -79,12 +79,13 @@ def BasisGP(priorFunction, basisFunction,
         def get_phi(self, params):
             self._construct_basis(params)
             for key, slc in self._slices.items():
-                self._phi[slc] = self._prior[key](
-                    self._labels[key], params=params) * self._labels[key][0]
+                phislc = self._prior[key](
+                    self._labels[key], params=params)
+                self._phi = self._phi.set(phislc, slc)
             return self._phi
 
         def get_phiinv(self, params):
-            return 1 / self.get_phi(params)
+            return self.get_phi(params).inv()
 
     return BasisGP
 
@@ -92,7 +93,7 @@ def BasisGP(priorFunction, basisFunction,
 def FourierBasisGP(spectrum, components=20,
                    selection=Selection(selections.no_selection),
                    Tspan=None):
-    """Convienience function to return a BasisGP class with a
+    """Convenience function to return a BasisGP class with a
     fourier basis."""
 
     basis = utils.createfourierdesignmatrix_red(nmodes=components, Tspan=Tspan)
@@ -176,9 +177,9 @@ def BasisCommonGP(priorFunction, basisFunction, orfFunction, name='common'):
         def __init__(self, psr):
 
             self._bases = basisFunction(psr.name+name, psr=psr)
-            params = sum([BasisCommonGP._prior._params.values(),
-                          BasisCommonGP._orf._params.values(),
-                          self._bases._params.values()], [])
+            params = sum([list(BasisCommonGP._prior._params.values()),
+                          list(BasisCommonGP._orf._params.values()),
+                          list(self._bases._params.values())], [])
             self._params = {}
             for param in params:
                 self._params[param.name] = param
@@ -196,14 +197,14 @@ def BasisCommonGP(priorFunction, basisFunction, orfFunction, name='common'):
         def get_phi(self, params):
             self._construct_basis(params)
             prior = BasisCommonGP._prior(
-                self._labels, params=params) * self._labels[0]
+                self._labels, params=params)
             orf = BasisCommonGP._orf(self._psrpos, self._psrpos, params=params)
             return prior * orf
 
         @classmethod
         def get_phicross(cls, signal1, signal2, params):
             prior = BasisCommonGP._prior(signal1._labels,
-                                         params=params) * signal1._labels[0]
+                                         params=params)
             orf = BasisCommonGP._orf(signal1._psrpos, signal2._psrpos,
                                      params=params)
             return prior * orf
