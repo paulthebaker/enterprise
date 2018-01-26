@@ -18,12 +18,11 @@ import numpy as np
 class Prior(object):
     r"""A class for Priors.
     A Prior object can return the probability density using the ``pdf()`` and
-    ``logpdf()`` methods.  These may take scalars or numpy arrays as
-    arguments.
+    ``logpdf()`` methods. These may take scalars or numpy arrays as arguments.
 
-    Note that Prior instances contain only the ``pdf()`` and ``logpdf()``
-    methods. They do not retain all of the original ``rv_continuous``
-    methods and attributes.
+    Note that Prior instances contain only the ``pdf()``, ``logpdf()``,
+    ``sample()``, and ``cdf()`` methods. They do not retain all of the original
+    ``rv_continuous`` methods and attributes.
 
     """
 
@@ -93,6 +92,21 @@ class Prior(object):
         else:
             v = np.float(value)
         return self._rv.logpdf(v)
+
+    def cdf(self, value):
+        """Return the cumulative distribution function at a specified value.
+
+        :param value: Input value of parameter.
+        :type value: float
+        :return: cdf at input value.
+
+        """
+        # The astype() calls prevent unsafe cast messages
+        if type(value) == np.ndarray:
+            v = value.astype(np.float64, casting='same_kind')
+        else:
+            v = np.float(value)
+        return self._rv.cdf(v)
 
     def sample(self, size=1, random_state=None):
         """Return a sample from probability distribution function.
