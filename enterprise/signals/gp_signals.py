@@ -28,8 +28,6 @@ def BasisGP(priorFunction, basisFunction,
         def __init__(self, psr):
 
             self._do_selection(psr, priorFunction, basisFunction, selection)
-            self._cache = {}
-            self._cache_list = []
 
         def _do_selection(self, psr, priorfn, basisfn, selection):
 
@@ -97,10 +95,14 @@ def FourierBasisGP(spectrum, components=20,
     """Convienience function to return a BasisGP class with a
     fourier basis."""
 
-    basis = base.Function(utils.createfourierdesignmatrix_red,
-                          nmodes=components, Tspan=Tspan)
+    basis = utils.createfourierdesignmatrix_red(nmodes=components, Tspan=Tspan)
     BaseClass = BasisGP(spectrum, basis, selection=selection)
-    return type(b'FourierBasisGP', (BaseClass,), {})
+
+    class FourierBasisGP(BaseClass):
+        signal_type = 'basis'
+        signal_name = 'red noise'
+
+    return FourierBasisGP
 
 
 def TimingModel():
@@ -139,6 +141,7 @@ def TimingModel():
     return TimingModel
 
 
+@base.function
 def ecorr_basis_prior(weights, log10_ecorr=-8):
     """Returns the ecorr prior.
     :param weights: A vector or weights for the ecorr prior.
@@ -151,10 +154,15 @@ def EcorrBasisModel(log10_ecorr=parameter.Uniform(-10, -5),
     """Convienience function to return a BasisGP class with a
     quantized ECORR basis."""
 
-    basis = base.Function(utils.create_quantization_matrix)
-    prior = base.Function(ecorr_basis_prior, log10_ecorr=log10_ecorr)
+    basis = utils.create_quantization_matrix()
+    prior = ecorr_basis_prior(log10_ecorr=log10_ecorr)
     BaseClass = BasisGP(prior, basis, selection=selection)
-    return type(b'EcorrBasisModel', (BaseClass,), {})
+
+    class EcorrBasisModel(BaseClass):
+        signal_type = 'basis'
+        signal_name = 'basis ecorr'
+
+    return EcorrBasisModel
 
 
 def BasisCommonGP(priorFunction, basisFunction, orfFunction, name='common'):
@@ -168,16 +176,14 @@ def BasisCommonGP(priorFunction, basisFunction, orfFunction, name='common'):
         def __init__(self, psr):
 
             self._bases = basisFunction(psr.name+name, psr=psr)
-            params = sum([BasisCommonGP._prior.params,
-                          BasisCommonGP._orf.params,
-                          self._bases.params], [])
+            params = sum([BasisCommonGP._prior._params.values(),
+                          BasisCommonGP._orf._params.values(),
+                          self._bases._params.values()], [])
             self._params = {}
             for param in params:
                 self._params[param.name] = param
 
             self._psrpos = psr.pos
-            self._cache = {}
-            self._cache_list = []
 
         @base.cache_call('basis_params')
         def _construct_basis(self, params={}):
@@ -213,8 +219,7 @@ def BasisCommonGP(priorFunction, basisFunction, orfFunction, name='common'):
 def FourierBasisCommonGP(spectrum, orf, components=20,
                          Tspan=None, name='common'):
 
-    basis = base.Function(utils.createfourierdesignmatrix_red,
-                          nmodes=components)
+    basis = utils.createfourierdesignmatrix_red(nmodes=components)
     BaseClass = BasisCommonGP(spectrum, basis, orf, name=name)
 
     class FourierBasisCommonGP(BaseClass):

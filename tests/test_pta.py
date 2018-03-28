@@ -9,19 +9,25 @@ Tests for common signal and PTA class modules.
 """
 
 
+#import os
+#import pickle
+import itertools
 import unittest
+
 import numpy as np
 
 from enterprise.pulsar import Pulsar
 
 import enterprise.signals.parameter as parameter
 import enterprise.signals.signal_base as signal_base
+import enterprise.signals.white_signals as white_signals
 import enterprise.signals.gp_signals as gp_signals
 from enterprise.signals import utils
 
-from tests.enterprise_test_data import datadir
+from .enterprise_test_data import datadir
 
 
+@signal_base.function
 def hd_orf(pos1, pos2):
     if np.all(pos1 == pos2):
         return 1
@@ -31,6 +37,15 @@ def hd_orf(pos1, pos2):
         return 1.5 * omc2 * np.log(omc2) - 0.25 * omc2 + 0.5
 
 
+@signal_base.function
+def vec_orf(pos1, pos2):
+    if np.all(pos1 == pos2):
+        return 1
+    else:
+        return 0.5 * np.dot(pos1, pos2)
+
+
+@signal_base.function
 def hd_orf_generic(pos1, pos2, a=1.5, b=0.25, c=0.25):
     if np.all(pos1 == pos2):
         return 1
@@ -40,29 +55,41 @@ def hd_orf_generic(pos1, pos2, a=1.5, b=0.25, c=0.25):
         return a * omc2 * np.log(omc2) - b * omc2 + c
 
 
+@signal_base.function
 def hd_powerlaw(f, pos1, pos2, log10_A=-15, gamma=4.3):
     return utils.powerlaw(f, log10_A, gamma) * hd_orf(pos1, pos2)
 
 
 class TestPTASignals(unittest.TestCase):
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         """Setup the Pulsar object."""
 
-        # initialize Pulsar class
-        self.psrs = [Pulsar(datadir + '/B1855+09_NANOGrav_9yv1.gls.par',
-                            datadir + '/B1855+09_NANOGrav_9yv1.tim'),
-                     Pulsar(datadir + '/J1909-3744_NANOGrav_9yv1.gls.par',
-                            datadir + '/J1909-3744_NANOGrav_9yv1.tim')]
+        #if os.path.isfile(datadir + '/B1855+09.pkl') and \
+        #        os.path.isfile(datadir + '/J1909-3744.pkl'):
+        #    self.psrs = [pickle.load(open(datadir + '/B1855+09.pkl','r')),
+        #                 pickle.load(open(datadir + '/J1909-3744.pkl','r'))]
+        #else:
+        #    self.psrs = [Pulsar(datadir + '/B1855+09_NANOGrav_9yv1.gls.par',
+        #                        datadir + '/B1855+09_NANOGrav_9yv1.tim'),
+        #                 Pulsar(datadir + '/J1909-3744_NANOGrav_9yv1.gls.par',
+        #                        datadir + '/J1909-3744_NANOGrav_9yv1.tim')]
+#
+        #    for psr in self.psrs:
+        #        psr.to_pickle(datadir)
+        cls.psrs = [Pulsar(datadir + '/B1855+09_NANOGrav_9yv1.gls.par',
+                           datadir + '/B1855+09_NANOGrav_9yv1.tim'),
+                    Pulsar(datadir + '/J1909-3744_NANOGrav_9yv1.gls.par',
+                           datadir + '/J1909-3744_NANOGrav_9yv1.tim')]
 
     def test_parameterized_orf(self):
         T1 = 3.16e8
-        pl = signal_base.Function(utils.powerlaw,
-                                  log10_A=parameter.Uniform(-18,-12),
-                                  gamma=parameter.Uniform(1,7))
-        orf = signal_base.Function(hd_orf_generic, a=parameter.Uniform(0,5),
-                                   b=parameter.Uniform(0,5),
-                                   c=parameter.Uniform(0,5))
+        pl = utils.powerlaw(log10_A=parameter.Uniform(-18,-12),
+                            gamma=parameter.Uniform(1,7))
+        orf = hd_orf_generic(a=parameter.Uniform(0,5),
+                             b=parameter.Uniform(0,5),
+                             c=parameter.Uniform(0,5))
         rn = gp_signals.FourierBasisGP(spectrum=pl, Tspan=T1, components=30)
         crn = gp_signals.FourierBasisCommonGP(spectrum=pl, orf=orf,
                                               components=30, name='gw',
@@ -114,14 +141,151 @@ class TestPTASignals(unittest.TestCase):
         assert np.allclose(phiinv, np.linalg.inv(phit),
                            rtol=1e-15, atol=1e-17), msg
 
+    def test_pta_phiinv_methods(self):
+        ef = white_signals.MeasurementNoise(efac=parameter.Uniform(0.1, 5))
+
+        span = np.max(self.psrs[0].toas) - np.min(self.psrs[0].toas)
+
+        pl = utils.powerlaw(log10_A=parameter.Uniform(-16,-13),
+                            gamma=parameter.Uniform(1,7))
+
+        orf = hd_orf()
+        vrf = vec_orf()
+
+        rn = gp_signals.FourierBasisGP(spectrum=pl,
+                                       components=30, Tspan=span)
+
+        hdrn = gp_signals.FourierBasisCommonGP(spectrum=pl, orf=orf,
+                                               components=20, Tspan=span,
+                                               name='gw')
+
+        vrn = gp_signals.FourierBasisCommonGP(spectrum=pl, orf=vrf,
+                                              components=20, Tspan=span,
+                                              name='vec')
+
+        vrn2 = gp_signals.FourierBasisCommonGP(spectrum=pl, orf=vrf,
+                                               components=20, Tspan=span*1.234,
+                                               name='vec2')
+
+        # two common processes, sharing basis partially
+
+        model = ef + rn + hdrn  # + vrn
+
+        pta = signal_base.PTA([model(psr) for psr in self.psrs])
+
+        ps = {p.name: float(p.sample()) for p in pta.params}
+
+        phi = pta.get_phi(ps)
+        ldp = np.linalg.slogdet(phi)[1]
+
+        inv1, ld1 = pta.get_phiinv(ps,method='cliques', logdet=True)
+        inv2, ld2 = pta.get_phiinv(ps,method='partition', logdet=True)
+        inv3, ld3 = pta.get_phiinv(ps,method='sparse', logdet=True)
+        inv3 = inv3.toarray()
+
+        for ld in [ld1, ld2, ld3]:
+            msg = "Wrong phi log determinant for two common processes"
+            assert np.allclose(ldp, ld, rtol=1e-15, atol=1e-6), msg
+
+        for inv in [inv1,inv2,inv3]:
+            msg = "Wrong phi inverse for two common processes"
+            assert np.allclose(np.dot(phi, inv), np.eye(phi.shape[0]),
+                               rtol=1e-15, atol=1e-6), msg
+
+        for inva, invb in itertools.combinations([inv1,inv2,inv3],2):
+            assert np.allclose(inva,invb)
+
+        # two common processes, no sharing basis
+
+        model = ef + rn + vrn2
+
+        pta = signal_base.PTA([model(psr) for psr in self.psrs])
+
+        ps = {p.name: float(p.sample()) for p in pta.params}
+
+        phi = pta.get_phi(ps)
+        ldp = np.linalg.slogdet(phi)[1]
+
+        inv1, ld1 = pta.get_phiinv(ps,method='cliques', logdet=True)
+        inv2, ld2 = pta.get_phiinv(ps,method='partition', logdet=True)
+        inv3, ld3 = pta.get_phiinv(ps,method='sparse', logdet=True)
+        inv3 = inv3.toarray()
+
+        for ld in [ld1, ld2, ld3]:
+            msg = "Wrong phi log determinant for two common processes"
+            assert np.allclose(ldp, ld, rtol=1e-15, atol=1e-6), msg
+
+        for inv in [inv1,inv2,inv3]:
+            msg = "Wrong phi inverse for two processes"
+            assert np.allclose(np.dot(phi, inv), np.eye(phi.shape[0]),
+                               rtol=1e-15, atol=1e-6), msg
+
+        for inva, invb in itertools.combinations([inv1,inv2,inv3],2):
+            assert np.allclose(inva,invb)
+
+        # three common processes, sharing basis partially
+
+        model = ef + rn + hdrn + vrn
+
+        pta = signal_base.PTA([model(psr) for psr in self.psrs])
+
+        ps = {p.name: float(p.sample()) for p in pta.params}
+
+        phi = pta.get_phi(ps)
+        ldp = np.linalg.slogdet(phi)[1]
+
+        inv1, ld1 = pta.get_phiinv(ps,method='cliques', logdet=True)
+        inv2, ld2 = pta.get_phiinv(ps,method='partition', logdet=True)
+        inv3, ld3 = pta.get_phiinv(ps,method='sparse', logdet=True)
+        inv3 = inv3.toarray()
+
+        for ld in [ld1, ld3]:
+            msg = "Wrong phi log determinant for two common processes"
+            assert np.allclose(ldp, ld, rtol=1e-15, atol=1e-6), msg
+
+        for inv in [inv1,inv3]:
+            msg = "Wrong phi inverse for three common processes"
+            assert np.allclose(np.dot(phi, inv), np.eye(phi.shape[0]),
+                               rtol=1e-15, atol=1e-6), msg
+
+        for inva, invb in itertools.combinations([inv1,inv3],2):
+            assert np.allclose(inva,invb)
+
+        # four common processes, three sharing basis partially
+
+        model = ef + rn + hdrn + vrn + vrn2
+
+        pta = signal_base.PTA([model(psr) for psr in self.psrs])
+
+        ps = {p.name: float(p.sample()) for p in pta.params}
+
+        phi = pta.get_phi(ps)
+        ldp = np.linalg.slogdet(phi)[1]
+
+        inv1, ld1 = pta.get_phiinv(ps,method='cliques', logdet=True)
+        inv2, ld2 = pta.get_phiinv(ps,method='partition', logdet=True)
+        inv3, ld3 = pta.get_phiinv(ps,method='sparse', logdet=True)
+        inv3 = inv3.toarray()
+
+        for ld in [ld1, ld3]:
+            msg = "Wrong phi log determinant for two common processes"
+            assert np.allclose(ldp, ld, rtol=1e-15, atol=1e-6), msg
+
+        for inv in [inv1, inv3]:
+            msg = "Wrong phi inverse for four processes"
+            assert np.allclose(np.dot(phi, inv), np.eye(phi.shape[0]),
+                               rtol=1e-15, atol=1e-6), msg
+
+        for inva, invb in itertools.combinations([inv1, inv3],2):
+            assert np.allclose(inva, invb)
+
     def test_pta_phi(self):
         T1, T2, T3 = 3.16e8, 3.16e8, 3.16e8
         nf1, nf2, nf3 = 2, 2, 1
 
-        pl = signal_base.Function(utils.powerlaw,
-                                  log10_A=parameter.Uniform(-18,-12),
-                                  gamma=parameter.Uniform(1,7))
-        orf = signal_base.Function(hd_orf)
+        pl = utils.powerlaw(log10_A=parameter.Uniform(-18,-12),
+                            gamma=parameter.Uniform(1,7))
+        orf = hd_orf()
         rn = gp_signals.FourierBasisGP(spectrum=pl, components=nf1, Tspan=T1)
         crn = gp_signals.FourierBasisCommonGP(spectrum=pl, orf=orf,
                                               components=1, name='gw',
@@ -173,6 +337,22 @@ class TestPTASignals(unittest.TestCase):
 
         msg = '{} {}'.format(np.diag(phi), np.diag(phit))
         assert np.allclose(phi, phit, rtol=1e-15, atol=1e-17), msg
+
         msg = 'PTA Phi inverse is incorrect {}.'.format(params)
         assert np.allclose(phiinv, np.linalg.inv(phit),
                            rtol=1e-15, atol=1e-17), msg
+
+
+class TestPTASignalsPint(TestPTASignals):
+
+    @classmethod
+    def setUpClass(cls):
+        """Setup the Pulsar object."""
+
+        # initialize Pulsar class
+        cls.psrs = [Pulsar(datadir + '/B1855+09_NANOGrav_9yv1.gls.par',
+                           datadir + '/B1855+09_NANOGrav_9yv1.tim',
+                           ephem='DE430', timing_package='pint'),
+                    Pulsar(datadir + '/J1909-3744_NANOGrav_9yv1.gls.par',
+                           datadir + '/J1909-3744_NANOGrav_9yv1.tim',
+                           ephem='DE430', timing_package='pint')]
