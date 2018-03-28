@@ -3,6 +3,8 @@ cache: pip
 
 python:
     - "2.7"
+    - "3.5"
+    - "3.6"
 
 before_install:
     - sudo apt-get install gfortran
@@ -22,12 +24,17 @@ install:
     - cd ..
     - rm -rf psrsoft-tempo2-*
 
-    - pip install -r requirements_dev.txt
+    - sudo apt-get update
+
+    - pip install numpy==1.13.3
     - pip install -r requirements.txt
-    - pip install libstempo --install-option="--with-tempo2=$TEMPO2"
+    - pip install -r requirements_dev.txt
+    - pip install git+https://github.com/vallis/libstempo.git --install-option="--with-tempo2=$TEMPO2"
+    - python setup.py install
 
 script:
-    - make test
+    #- make test
+    - coverage run --source enterprise setup.py test
     - make lint
 
 after_success:

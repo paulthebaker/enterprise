@@ -10,6 +10,7 @@ import numpy as np
 from ephem import Ecliptic, Equatorial
 import os
 import json
+from enterprise.signals import utils
 
 try:
     import cPickle as pickle
@@ -22,10 +23,16 @@ except ImportError:
     print('ERROR: Must have libstempo package installed!')
     t2 = None
 
-import pint.toa as toa
-import pint.models.model_builder as mb
-from pint.models import TimingModel
-from pint.residuals import resids
+try:
+    import pint
+    import pint.toa as toa
+    import pint.models.model_builder as mb
+    from pint.models import TimingModel
+    from pint.residuals import resids
+except ImportError:
+    print('No PINT? Meh...')
+    pint = None
+
 import astropy.units as u
 
 
@@ -59,15 +66,20 @@ class BasePulsar(object):
         with open(dfile, 'r') as fl:
             pdict = json.load(fl)
 
-        try:
-            pdist = tuple(pdict[self.name])
-        except KeyError:
+        if self.name[0] not in ['J', 'B']:
+            if 'J' + self.name in pdict:
+                pdist = tuple(pdict.get('J'+self.name))
+            elif 'B' + self.name in pdict:
+                pdist = tuple(pdict.get('B'+self.name))
+        else:
+            pdist = tuple(pdict.get(self.name, (1.0, 0.2)))
+
+        if pdist == (1.0, 0.2):
             # TODO: should use logging here
             msg = 'WARNING: Could not find pulsar distance for '
             msg += 'PSR {0}.'.format(self.name)
             msg += ' Setting value to 1 with 20% uncertainty.'
             print(msg)
-            pdist = (1.0, 0.2)
         return pdist
 
     def _get_radec_from_ecliptic(self, elong, elat):
@@ -149,7 +161,7 @@ class BasePulsar(object):
         if not os.path.exists(outdir):
             os.makedirs(outdir)
 
-        with open(outdir + '/{0}.pkl'.format(self.name), 'w') as f:
+        with open(outdir + '/{0}.pkl'.format(self.name), 'wb') as f:
             pickle.dump(self, f)
 
     @property
@@ -236,9 +248,14 @@ class BasePulsar(object):
         return self._pos
 
     @property
+    def pos_t(self):
+        """Return unit vector to pulsar as function of time."""
+        return self._pos_t[self._isort, :]
+
+    @property
     def planetssb(self):
         """Return planetary position vectors at all timestamps"""
-        return self._planetssb
+        return self._planetssb[self._isort, :, :]
 
 
 class PintPulsar(BasePulsar):
@@ -287,6 +304,9 @@ class PintPulsar(BasePulsar):
         self._pos = self._get_pos()
         self._planetssb = self._get_planetssb()
 
+        # TODO: pos_t not currently implemented
+        self._pos_t = np.zeros((len(self._toas), 3))
+
         self.sort_data()
 
     def _get_radec(self, model):
@@ -299,7 +319,7 @@ class PintPulsar(BasePulsar):
             return self._get_radec_from_ecliptic(elong*d2r, elat*d2r)
 
     def _get_planetssb(self):
-        return None
+        return np.zeros((len(self._toas), 9, 6))
 
 
 class Tempo2Pulsar(BasePulsar):
@@ -332,7 +352,12 @@ class Tempo2Pulsar(BasePulsar):
         self._pdist = self._get_pdist()
         self._raj, self._decj = self._get_radec(t2pulsar)
         self._pos = self._get_pos()
-        self._planetssb = self._get_planetssb()
+        self._planetssb = self._get_planetssb(t2pulsar)
+
+        self._pos_t = t2pulsar.psrPos.copy()
+        if 'ELONG' and 'ELAT' in np.concatenate((t2pulsar.pars(which='fit'),
+                                                 t2pulsar.pars(which='set'))):
+            self._pos_t = utils.ecl2eq_vec(self._pos_t)
 
         self.sort_data()
 
@@ -351,7 +376,7 @@ class Tempo2Pulsar(BasePulsar):
             elat = t2pulsar['ELAT'].val
             return self._get_radec_from_ecliptic(elong, elat)
 
-    def _get_planetssb(self):
+    def _get_planetssb(self, t2pulsar):
         planetssb = None
         if self.planets:
             for ii in range(1, 10):
@@ -368,6 +393,13 @@ class Tempo2Pulsar(BasePulsar):
             planetssb[:, 6, :] = self.t2pulsar.uranus_ssb
             planetssb[:, 7, :] = self.t2pulsar.neptune_ssb
             planetssb[:, 8, :] = self.t2pulsar.pluto_ssb
+
+            if 'ELONG' and 'ELAT' in np.concatenate((t2pulsar.pars(),
+                                                     t2pulsar.pars(
+                                                         which='set'))):
+                for ii in range(9):
+                    planetssb[:,ii,:3] = utils.ecl2eq_vec(planetssb[:,ii,:3])
+                    planetssb[:,ii,3:] = utils.ecl2eq_vec(planetssb[:,ii,3:])
         return planetssb
 
 
@@ -379,15 +411,18 @@ def Pulsar(*args, **kwargs):
     drop_t2pulsar = kwargs.get('drop_t2pulsar', True)
     timing_package = kwargs.get('timing_package', 'tempo2')
 
-    toas = filter(lambda x: isinstance(x, toa.TOAs), args)
-    model = filter(lambda x: isinstance(x, TimingModel), args)
-    t2pulsar = filter(lambda x: isinstance(x, t2.tempopulsar), args)
-    parfile = filter(lambda x: isinstance(x, str) and
-                     x.split('.')[-1] == 'par', args)
-    timfile = filter(lambda x: isinstance(x, str) and
-                     x.split('.')[-1] in ['tim', 'toa'], args)
+    if pint:
+        toas = list(filter(lambda x: isinstance(x, toa.TOAs), args))
+        model = list(filter(lambda x: isinstance(x, TimingModel), args))
 
-    if toas and model:
+    t2pulsar = list(filter(lambda x: isinstance(x, t2.tempopulsar), args))
+
+    parfile = list(filter(lambda x: isinstance(x, str) and
+                          x.split('.')[-1] == 'par', args))
+    timfile = list(filter(lambda x: isinstance(x, str) and
+                          x.split('.')[-1] in ['tim', 'toa'], args))
+
+    if pint and toas and model:
         return PintPulsar(toas[0], model[0], sort=sort, planets=planets)
     elif t2pulsar:
         return Tempo2Pulsar(t2pulsar, sort=sort, drop_t2pulsar=drop_t2pulsar,
@@ -401,7 +436,7 @@ def Pulsar(*args, **kwargs):
 
         # Obtain the directory name of the timfile, and change to it
         timfiletup = os.path.split(timfile[0])
-        dirname = timfiletup[0]
+        dirname = timfiletup[0] or './'
         reltimfile = timfiletup[-1]
         relparfile = os.path.relpath(parfile[0], dirname)
 
@@ -423,7 +458,7 @@ def Pulsar(*args, **kwargs):
         elif timing_package.lower() == 'tempo2':
 
             # hack to set maxobs
-            maxobs = get_maxobs(reltimfile)
+            maxobs = get_maxobs(reltimfile) + 100
             t2pulsar = t2.tempopulsar(relparfile, reltimfile,
                                       maxobs=maxobs, ephem=ephem)
             os.chdir(cwd)

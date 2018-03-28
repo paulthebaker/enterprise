@@ -11,6 +11,7 @@ from scipy.interpolate import interp1d
 from scipy.integrate import odeint
 from scipy import special as ss
 from pkg_resources import resource_filename, Requirement
+import enterprise
 import enterprise.constants as const
 from enterprise.signals import signal_base
 
@@ -51,7 +52,6 @@ def createfourierdesignmatrix_red(toas, nmodes=30, Tspan=None,
                                   pshift=False):
     """
     Construct fourier design matrix from eq 11 of Lentati et al, 2013
-
     :param toas: vector of time series in seconds
     :param nmodes: number of fourier coefficients to use
     :param freq: option to output frequencies
@@ -60,7 +60,6 @@ def createfourierdesignmatrix_red(toas, nmodes=30, Tspan=None,
     :param fmin: lower sampling frequency
     :param fmax: upper sampling frequency
     :param pshift: option to add random phase shift
-
     :return: F: fourier design matrix
     :return: f: Sampling frequencies
     """
@@ -71,15 +70,23 @@ def createfourierdesignmatrix_red(toas, nmodes=30, Tspan=None,
     T = Tspan if Tspan is not None else toas.max() - toas.min()
 
     # define sampling frequencies
-    if fmin is None:
-        fmin = 1 / T
-    if fmax is None:
-        fmax = nmodes / T
-
-    if logf:
-        f = np.logspace(np.log10(fmin), np.log10(fmax), nmodes)
+    if fmin is None and fmax is None and not logf:
+        # make sure partially overlapping sets of modes
+        # have identical frequencies
+        f = 1.0 * np.arange(1, nmodes + 1) / T
     else:
-        f = np.linspace(fmin, fmax, nmodes)
+        # more general case
+
+        if fmin is None:
+            fmin = 1 / T
+
+        if fmax is None:
+            fmax = nmodes / T
+
+        if logf:
+            f = np.logspace(np.log10(fmin), np.log10(fmax), nmodes)
+        else:
+            f = np.linspace(fmin, fmax, nmodes)
 
     # add random phase shift to basis functions
     ranphase = (np.random.uniform(0.0, 2 * np.pi, nmodes)
@@ -123,7 +130,8 @@ def createfourierdesignmatrix_dm(toas, freqs, nmodes=30, Tspan=None,
 
     # compute the DM-variation vectors
     # TODO: should we use a different normalization
-    Dm = 1.0/(const.DM_K * freqs**2 * 1e12)
+    #Dm = 1.0/(const.DM_K * freqs**2 * 1e12)
+    Dm = (1400/freqs)**2
 
     return F * Dm[:, None], Ffreqs
 
@@ -584,36 +592,83 @@ def calculate_splus_scross(nmax, mc, dl, h0, F, e,
     return np.sum(splus_n, axis=1), np.sum(scross_n, axis=1)
 
 
-def fplus_fcross(ptheta, pphi, gwtheta, gwphi):
+def create_gw_antenna_pattern(pos, gwtheta, gwphi):
     """
-    Compute gravitational-wave quadrupolar antenna pattern.
+    Function to create pulsar antenna pattern functions as defined
+    in Ellis, Siemens, and Creighton (2012).
+    :param pos: Unit vector from Earth to pulsar
+    :param gwtheta: GW polar angle in radians
+    :param gwphi: GW azimuthal angle in radians
 
-    :param ptheta: Polar angle of pulsar in celestial coords [radians]
-    :param pphi: Azimuthal angle of pulsar in celestial coords [radians]
-    :param gwtheta: Polar angle of GW source in celestial coords [radians]
-    :param gwphi: Azimuthal angle of GW source in celestial coords [radians]
-
-    :returns: fplus, fcross
+    :return: (fplus, fcross, cosMu), where fplus and fcross
+             are the plus and cross antenna pattern functions
+             and cosMu is the cosine of the angle between the
+             pulsar and the GW source.
     """
-
-    # define variable for later use
-    cosgwtheta, cosgwphi = np.cos(gwtheta), np.cos(gwphi)
-    singwtheta, singwphi = np.sin(gwtheta), np.sin(gwphi)
-
-    # unit vectors to GW source
-    m = np.array([singwphi, -cosgwphi, 0.0])
-    n = np.array([-cosgwtheta*cosgwphi, -cosgwtheta*singwphi, singwtheta])
-    omhat = np.array([-singwtheta*cosgwphi, -singwtheta*singwphi, -cosgwtheta])
 
     # use definition from Sesana et al 2010 and Ellis et al 2012
-    phat = np.array([np.sin(ptheta)*np.cos(pphi), np.sin(ptheta)*np.sin(pphi),
-                     np.cos(ptheta)])
+    m = np.array([np.sin(gwphi), -np.cos(gwphi), 0.0])
+    n = np.array([-np.cos(gwtheta)*np.cos(gwphi),
+                  -np.cos(gwtheta)*np.sin(gwphi),
+                  np.sin(gwtheta)])
+    omhat = np.array([-np.sin(gwtheta)*np.cos(gwphi),
+                      -np.sin(gwtheta)*np.sin(gwphi),
+                      -np.cos(gwtheta)])
 
-    fplus = (0.5 * (np.dot(m, phat)**2 - np.dot(n, phat)**2) /
-             (1+np.dot(omhat, phat)))
-    fcross = (np.dot(m, phat)*np.dot(n, phat)) / (1 + np.dot(omhat, phat))
+    fplus = (0.5 * (np.dot(m, pos)**2 - np.dot(n, pos)**2) /
+             (1+np.dot(omhat, pos)))
+    fcross = (np.dot(m, pos)*np.dot(n, pos)) / (1 + np.dot(omhat, pos))
+    cosMu = -np.dot(omhat, pos)
 
-    return fplus, fcross
+    return fplus, fcross, cosMu
+
+
+@signal_base.function
+def bwm_delay(toas, pos, log10_h=-14.0, cos_gwtheta=0.0, gwphi=0.0,
+              gwpol=0.0, t0=55000, antenna_pattern_fn=None):
+    """
+    Function that calculates the earth-term gravitational-wave
+    burst-with-memory signal, as described in:
+    Seto et al, van haasteren and Levin, phsirkov et al, Cordes and Jenet.
+    This version uses the F+/Fx polarization modes, as verified with the
+    Continuous Wave and Anisotropy papers.
+
+    :param toas: Time-of-arrival measurements [s]
+    :param pos: Unit vector from Earth to pulsar
+    :param log10_h: log10 of GW strain
+    :param cos_gwtheta: Cosine of GW polar angle
+    :param gwphi: GW azimuthal polar angle [rad]
+    :param gwpol: GW polarization angle
+    :param t0: Burst central time [day]
+    :param antenna_pattern_fn:
+        User defined function that takes `pos`, `gwtheta`, `gwphi` as
+        arguments and returns (fplus, fcross)
+
+    :return: the waveform as induced timing residuals (seconds)
+    """
+
+    # convert
+    h = 10**log10_h
+    gwtheta = np.arccos(cos_gwtheta)
+    t0 *= const.day
+
+    # antenna patterns
+    if antenna_pattern_fn is None:
+        apc = create_gw_antenna_pattern(pos, gwtheta, gwphi)
+    else:
+        apc = antenna_pattern_fn(pos, gwtheta, gwphi)
+
+    # grab fplus, fcross
+    fp, fc = apc[0], apc[1]
+
+    # combined polarization
+    pol = np.cos(2*gwpol)*fp + np.sin(2*gwpol)*fc
+
+    # Define the heaviside function
+    heaviside = lambda x: 0.5 * (np.sign(x) + 1)
+
+    # Return the time-series for the pulsar
+    return pol * h * heaviside(toas-t0) * (toas-t0)
 
 
 @signal_base.function
@@ -663,24 +718,258 @@ def quant2ind(U):
     return inds
 
 
+def linear_interp_basis(toas, dt=30*86400):
+    """Provides a basis for linear interpolation.
+
+    :param toas: Pulsar TOAs in seconds
+    :param dt: Linear interpolation step size in seconds.
+
+    :returns: Linear interpolation basis and nodes
+    """
+
+    # evenly spaced points
+    x = np.arange(toas.min(), toas.max()+dt, dt)
+    M = np.zeros((len(toas), len(x)))
+
+    # make linear interpolation basis
+    for ii in range(len(x)-1):
+        idx = np.logical_and(toas >= x[ii], toas <= x[ii+1])
+        M[idx, ii] = (toas[idx] - x[ii+1]) / (x[ii] - x[ii+1])
+        M[idx, ii+1] = (toas[idx] - x[ii]) / (x[ii+1] - x[ii])
+
+    # only return non-zero columns
+    idx = M.sum(axis=0) != 0
+
+    return M[:, idx], x[idx]
+
+
 @signal_base.function
 def powerlaw(f, log10_A=-16, gamma=5):
+    df = np.diff(np.concatenate((np.array([0]), f[::2])))
     return ((10**log10_A)**2 / 12.0 / np.pi**2 *
-            const.fyr**(gamma-3) * f**(-gamma))
+            const.fyr**(gamma-3) * f**(-gamma) * np.repeat(df, 2))
 
 
 @signal_base.function
 def turnover(f, log10_A=-15, gamma=4.33, lf0=-8.5, kappa=10/3, beta=0.5):
+    df = np.diff(np.concatenate((np.array([0]), f[::2])))
     hcf = (10**log10_A * (f / const.fyr) ** ((3-gamma) / 2) /
            (1 + (10**lf0 / f) ** kappa) ** beta)
-    return hcf**2/12/np.pi**2/f**3
+    return hcf**2/12/np.pi**2/f**3*np.repeat(df, 2)
 
+
+# overlap reduction functions
 
 @signal_base.function
 def hd_orf(pos1, pos2):
+    """ Hellings & Downs spatial correlation function."""
     if np.all(pos1 == pos2):
         return 1
     else:
-        xi = 1 - np.dot(pos1, pos2)
-        omc2 = (1 - np.cos(xi)) / 2
+        omc2 = (1 - np.dot(pos1, pos2)) / 2
         return 1.5 * omc2 * np.log(omc2) - 0.25 * omc2 + 0.5
+
+
+@signal_base.function
+def dipole_orf(pos1, pos2):
+    """Dipole spatial correlation function."""
+    if np.all(pos1 == pos2):
+        return 1 + 1e-5
+    else:
+        return np.dot(pos1, pos2)
+
+
+@signal_base.function
+def monopole_orf(pos1, pos2):
+    """Monopole spatial correlation function."""
+    if np.all(pos1 == pos2):
+        return 1.0 + 1e-5
+    else:
+        return 1.0
+
+
+@signal_base.function
+def anis_orf(pos1, pos2, params, **kwargs):
+    """Anisotropic GWB spatial correlation function."""
+
+    anis_basis = kwargs['anis_basis']
+    psrs_pos = kwargs['psrs_pos']
+    lmax = kwargs['lmax']
+
+    psr1_index = [ii for ii in range(len(psrs_pos))
+                  if np.all(psrs_pos[ii] == pos1)][0]
+    psr2_index = [ii for ii in range(len(psrs_pos))
+                  if np.all(psrs_pos[ii] == pos2)][0]
+
+    clm = np.zeros((lmax+1)**2)
+    clm[0] = 2.0*np.sqrt(np.pi)
+    if lmax > 0:
+        clm[1:] = params
+
+    return sum(clm[ii]*basis for ii,basis
+               in enumerate(anis_basis[:(lmax+1)**2,
+                                       psr1_index, psr2_index]))
+
+
+@signal_base.function
+def normed_tm_basis(Mmat):
+    norm = np.sqrt(np.sum(Mmat**2, axis=0))
+    return Mmat / norm, np.ones_like(Mmat.shape[1])
+
+
+@signal_base.function
+def svd_tm_basis(Mmat):
+    u, s, v = np.linalg.svd(Mmat, full_matrices=False)
+    return u, np.ones_like(s)
+
+
+@signal_base.function
+def tm_prior(weights):
+    return weights * 1e40
+
+
+# Physical ephemeris model utility functions
+
+t_offset = 55197.0
+e_ecl = 23.43704 * np.pi / 180.0
+M_ecl = np.array([[1.0, 0.0, 0.0],
+                  [0.0, np.cos(e_ecl), -np.sin(e_ecl)],
+                  [0.0, np.sin(e_ecl), np.cos(e_ecl)]])
+
+
+def get_planet_orbital_elements():
+    """Grab physical ephemeris model files"""
+    dpath = enterprise.__path__[0] + '/datafiles/ephemeris/'
+    jup_mjd = np.load(dpath + 'jupiter-orbel-mjd.npy')
+    jup_orbelxyz = np.load(dpath + 'jupiter-orbel-xyz-svd.npy')
+    sat_mjd = np.load(dpath + 'saturn-orbel-mjd.npy')
+    sat_orbelxyz = np.load(dpath + 'saturn-orbel-xyz-svd.npy')
+    return jup_mjd, jup_orbelxyz, sat_mjd, sat_orbelxyz
+
+
+def ecl2eq_vec(x):
+    """
+    Rotate (n,3) vector time series from ecliptic to equatorial.
+    """
+    return np.einsum('jk,ik->ij', M_ecl, x)
+
+
+def eq2ecl_vec(x):
+    """
+    Rotate (n,3) vector time series from equatorial to ecliptic.
+    """
+    return np.einsum('kj,ik->ij', M_ecl, x)
+
+
+def euler_vec(z, y, x, n):
+    """
+    Return (n,3,3) tensor with each (3,3) block containing an
+    Euler rotation with angles z, y, x. Optionally each of z, y, x
+    can be a vector of length n.
+    """
+    L = np.zeros((n,3,3), 'd')
+    cosx, sinx = np.cos(x), np.sin(x)
+    L[:,0,0] = 1
+    L[:,1,1] = L[:,2,2] = cosx
+    L[:,1,2] = -sinx
+    L[:,2,1] = sinx
+
+    N = np.zeros((n,3,3),'d')
+    cosy, siny = np.cos(y), np.sin(y)
+    N[:,0,0] = N[:,2,2] = cosy
+    N[:,1,1] = 1
+    N[:,0,2] = siny
+    N[:,2,0] = -siny
+
+    ret = np.einsum('ijk,ikl->ijl', L, N)
+
+    M = np.zeros((n,3,3),'d')
+    cosz, sinz = np.cos(z), np.sin(z)
+    M[:,0,0] = M[:,1,1] = cosz
+    M[:,0,1] = -sinz
+    M[:,1,0] = sinz
+    M[:,2,2] = 1
+
+    ret = np.einsum('ijk,ikl->ijl', ret, M)
+
+    return ret
+
+
+def ss_framerotate(mjd, planet, x, y, z, dz,
+                   offset=None, equatorial=False):
+    """
+    Rotate planet trajectory given as (n,3) tensor,
+    by ecliptic Euler angles x, y, z, and by z rate
+    dz. The rate has units of rad/year, and is referred
+    to offset 2010/1/1. dates must be given in MJD.
+    """
+    if equatorial:
+        planet = eq2ecl_vec(planet)
+
+    E = euler_vec(z + dz * (mjd - t_offset) / 365.25, y, x,
+                  planet.shape[0])
+
+    planet = np.einsum('ijk,ik->ij', E, planet)
+
+    if offset is not None:
+        planet = np.array(offset) + planet
+
+    if equatorial:
+        planet = ecl2eq_vec(planet)
+
+    return planet
+
+
+def dmass(planet, dm_over_Msun):
+    return dm_over_Msun * planet
+
+
+@signal_base.function
+def physical_ephem_delay(toas, planetssb, pos_t, frame_drift_rate=0,
+                         d_jupiter_mass=0, d_saturn_mass=0, d_uranus_mass=0,
+                         d_neptune_mass=0, jup_orb_elements=np.zeros(6),
+                         sat_orb_elements=np.zeros(6), inc_jupiter_orb=False,
+                         jup_orbelxyz=None, jup_mjd=None, inc_saturn_orb=False,
+                         sat_orbelxyz=None, sat_mjd=None, equatorial=True):
+
+        # convert toas to MJD
+        mjd = toas / 86400
+
+        # grab planet-to-SSB vectors
+        earth = planetssb[:, 2, :3]
+        jupiter = planetssb[:, 4, :3]
+        saturn = planetssb[:, 5, :3]
+        uranus = planetssb[:, 6, :3]
+        neptune = planetssb[:, 7, :3]
+
+        # do frame rotation
+        earth = ss_framerotate(mjd, earth, 0.0, 0.0, 0.0, frame_drift_rate,
+                               offset=None, equatorial=equatorial)
+
+        # mass perturbations
+        mpert = [(jupiter, d_jupiter_mass), (saturn, d_saturn_mass),
+                 (uranus, d_uranus_mass), (neptune, d_neptune_mass)]
+        for planet, dm in mpert:
+            earth += dmass(planet, dm)
+
+        # jupter orbital element perturbations
+        if inc_jupiter_orb:
+            jup_perturb_tmp = 0.0009547918983127075 * np.einsum(
+                'i,ijk->jk', jup_orb_elements, jup_orbelxyz)
+            earth += np.array([np.interp(mjd, jup_mjd, jup_perturb_tmp[:,aa])
+                               for aa in range(3)]).T
+
+        # saturn orbital element perturbations
+        if inc_saturn_orb:
+            sat_perturb_tmp = 0.00028588567008942334 * np.einsum(
+                'i,ijk->jk', sat_orb_elements, sat_orbelxyz)
+            earth += np.array([np.interp(mjd, sat_mjd, sat_perturb_tmp[:,aa])
+                               for aa in range(3)]).T
+
+        # construct the true geocenter to barycenter roemer
+        tmp_roemer = np.einsum('ij,ij->i', planetssb[:, 2, :3], pos_t)
+
+        # create the delay
+        delay = tmp_roemer - np.einsum('ij,ij->i', earth, pos_t)
+
+        return delay
